@@ -1,3 +1,11 @@
+<!--
+ * @Author: Aression 1040901628@qq.com
+ * @Date: 2025-09-08 15:59:27
+ * @LastEditors: Aression 1040901628@qq.com
+ * @LastEditTime: 2025-09-08 16:08:46
+ * @FilePath: \CampusAutoLogin\README.md
+ * @Description: 这是默认设置,请设置`customMade`, 打开koroFileHeader查看配置 进行设置: https://github.com/OBKoro1/koro1FileHeader/wiki/%E9%85%8D%E7%BD%AE
+-->
 ### Campus Auto-Login
 
 一个简单、无界面的校园网自动登录程序，可自动检测网络状态并完成认证，确保网络连接的稳定性。
@@ -22,6 +30,7 @@
 
 * 在“**账号**”字段中输入你的学号或账号。
 * 在“**密码**”字段中输入你的密码。
+* 在“**认证IP**”字段中输入你校园网对应的 Dr.com 认证IP地址。
 * 勾选“**开机自启**”选项，让程序随系统自动启动。
 * 点击“**保存并启动**”，程序将保存配置并立即进入后台运行。
 

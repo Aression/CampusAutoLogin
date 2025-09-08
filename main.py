@@ -1,26 +1,23 @@
 """
 校园网自动登录程序
 功能：检测网络状态并自动登录校园网
-版本：6.1 (GUI配置后自动启动的静默版)
+版本：6.2 (GUI配置后自动启动的静默版)
 """
 
 import sys
 import os
 import time
-import subprocess
 import requests
 import uuid
 import socket
-import threading
 import configparser
 import winreg
-import argparse
 import logging
 import logging.handlers
 
 # GUI 库
 import tkinter as tk
-from tkinter import simpledialog, messagebox
+from tkinter import messagebox
 
 # =============================================================================
 # 日志配置
@@ -46,14 +43,14 @@ class ConfigManager:
     """管理程序配置和用户凭证"""
     def __init__(self):
         self.config = configparser.ConfigParser()
+        # 更新默认配置，增加 Dr.com 认证IP字段
         self.default_config = {
             'User': {
                 'account': '',
                 'password': ''
             },
             'Network': {
-                'login_url': 'http://10.254.7.4/',
-                'login_api': 'http://10.254.7.4:801/eportal/portal/login',
+                'dr_com_ip': '10.254.7.4', # 默认的 Dr.com IP
                 'success_flag': '"result":1'
             },
             'Run': {
@@ -66,11 +63,13 @@ class ConfigManager:
             }
         }
         
+        # 如果配置文件不存在，创建并写入默认配置
         if not os.path.exists(CONFIG_FILE):
             for section, options in self.default_config.items():
                 self.config[section] = {k: str(v) for k, v in options.items()}
             self.save_config()
         else:
+            # 如果配置文件存在，读取并检查是否有缺失的配置项，如果有则添加
             self.config.read(CONFIG_FILE)
             for section, options in self.default_config.items():
                 if section not in self.config:
@@ -101,8 +100,7 @@ class ConfigManager:
     def get_network_config(self) -> dict:
         """获取网络配置"""
         network_config = {
-            'login_url': self.config.get('Network', 'login_url', fallback=self.default_config['Network']['login_url']),
-            'login_api': self.config.get('Network', 'login_api', fallback=self.default_config['Network']['login_api']),
+            'dr_com_ip': self.config.get('Network', 'dr_com_ip', fallback=self.default_config['Network']['dr_com_ip']),
             'success_flag': self.config.get('Network', 'success_flag', fallback=self.default_config['Network']['success_flag']),
             'page_titles': {
                 'need_login': '上网登录页',
@@ -120,6 +118,11 @@ class ConfigManager:
         """更新并保存用户凭证"""
         self.config['User']['account'] = account
         self.config['User']['password'] = password
+        self.save_config()
+
+    def update_dr_com_ip(self, ip: str):
+        """更新并保存 Dr.com IP"""
+        self.config['Network']['dr_com_ip'] = ip
         self.save_config()
 
     def update_autostart(self, value: bool):
@@ -218,10 +221,15 @@ class CampusLoginService:
         self.run_config = self.config_manager.get_run_config()
         self.user_credentials = self.config_manager.get_user_credentials()
 
+        # 根据配置的IP动态生成 URL
+        self.dr_com_ip = self.network_config.get('dr_com_ip', '')
+        self.login_url = f'http://{self.dr_com_ip}/'
+        self.login_api = f'http://{self.dr_com_ip}:801/eportal/portal/login'
+
     def check_login_status(self) -> str:
         """检查当前登录状态"""
         try:
-            response = requests.get(self.network_config['login_url'], timeout=5)
+            response = requests.get(self.login_url, timeout=5)
             response.raise_for_status()
             response_text = response.text
             if self.network_config['page_titles']['already_login'] in response_text:
@@ -256,7 +264,7 @@ class CampusLoginService:
         """尝试登录校园网"""
         try:
             response = requests.get(
-                self.network_config['login_api'],
+                self.login_api,
                 params=login_params,
                 timeout=10
             )
@@ -338,9 +346,10 @@ class ConfigGUI(tk.Toplevel):
         self.master = master
         self.config_manager = config_manager
         self.user_credentials = self.config_manager.get_user_credentials()
+        self.network_config = self.config_manager.get_network_config()
 
         self.title("校园网自动登录程序配置")
-        self.geometry("300x200")
+        self.geometry("300x250")
         self.resizable(False, False)
         self.attributes('-topmost', True)
 
@@ -360,24 +369,32 @@ class ConfigGUI(tk.Toplevel):
         self.password_entry.grid(row=1, column=1, pady=5)
         self.password_entry.insert(0, self.user_credentials['password'])
 
+        # 新增认证IP输入框
+        tk.Label(frame, text="认证IP:").grid(row=2, column=0, sticky="w", pady=5)
+        self.ip_entry = tk.Entry(frame, width=30)
+        self.ip_entry.grid(row=2, column=1, pady=5)
+        self.ip_entry.insert(0, self.network_config['dr_com_ip'])
+
         self.autostart_var = tk.BooleanVar()
         self.autostart_var.set(self.config_manager.get_run_config()['autostart'])
         self.autostart_check = tk.Checkbutton(frame, text="开机自启", variable=self.autostart_var)
-        self.autostart_check.grid(row=2, column=0, columnspan=2, pady=10)
+        self.autostart_check.grid(row=3, column=0, columnspan=2, pady=10)
 
         save_button = tk.Button(frame, text="保存并启动", command=self.save_and_quit)
-        save_button.grid(row=3, column=0, columnspan=2, pady=10)
+        save_button.grid(row=4, column=0, columnspan=2, pady=10)
 
     def save_and_quit(self):
         account = self.account_entry.get().strip()
         password = self.password_entry.get().strip()
+        ip = self.ip_entry.get().strip()
         autostart = self.autostart_var.get()
 
-        if not account or not password:
-            messagebox.showerror("错误", "账号和密码不能为空！")
+        if not account or not password or not ip:
+            messagebox.showerror("错误", "账号、密码和认证IP都不能为空！")
             return
 
         self.config_manager.update_user_credentials(account, password)
+        self.config_manager.update_dr_com_ip(ip)
         self.config_manager.update_autostart(autostart)
         set_autostart(autostart)
 
@@ -408,19 +425,24 @@ if __name__ == "__main__":
     is_frozen = getattr(sys, 'frozen', False)
     config_manager = ConfigManager()
     user_credentials = config_manager.get_user_credentials()
+    network_config = config_manager.get_network_config()
+
     has_credentials = all(user_credentials.values())
+    has_ip = network_config.get('dr_com_ip', '').strip() != ''
     
-    # 无配置，启动GUI配置界面
-    if not has_credentials:
-        logging.info("首次运行，启动GUI配置...")
+    # 首次运行或配置不完整时，启动GUI配置界面
+    if not has_credentials or not has_ip:
+        logging.info("首次运行或配置不完整，启动GUI配置...")
         root = tk.Tk()
         root.withdraw()  # 隐藏主窗口
         ConfigGUI(root, config_manager)
         root.mainloop()
         
         # mainloop结束后，意味着GUI已关闭
-        # 此时配置已保存，直接进入后台服务
-        if all(config_manager.get_user_credentials().values()):
+        # 此时配置已保存，检查是否可以进入后台服务
+        updated_credentials = config_manager.get_user_credentials()
+        updated_network_config = config_manager.get_network_config()
+        if all(updated_credentials.values()) and updated_network_config.get('dr_com_ip', '').strip():
             logging.info("GUI配置完成，自动启动后台服务。")
             show_notification("程序启动", "校园网自动登录服务已在后台运行")
             run_main_service(config_manager)
