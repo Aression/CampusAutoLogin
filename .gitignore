@@ -1,5 +1,7 @@
 build/
 dist/
+__pycache__/
 *.spec
 *.ini
 *.log
+*.pyc
