@@ -1,7 +1,7 @@
 """
 校园网自动登录程序
 功能：检测网络状态并自动登录校园网
-版本：6.2 (GUI配置后自动启动的静默版)
+版本：6.3 (优化了逻辑和通知机制)
 """
 
 import sys
@@ -80,8 +80,6 @@ class ConfigManager:
                 'check_interval': 100,
                 'retry_interval': 5,
                 'max_retries': 3,
-                'max_failures': 5,
-                'long_interval': 300,
                 'autostart': False,
                 'log_path': os.getcwd() # 默认日志路径为当前目录
             }
@@ -115,8 +113,6 @@ class ConfigManager:
             'check_interval': self.config.getint('Run', 'check_interval', fallback=self.default_config['Run']['check_interval']),
             'retry_interval': self.config.getint('Run', 'retry_interval', fallback=self.default_config['Run']['retry_interval']),
             'max_retries': self.config.getint('Run', 'max_retries', fallback=self.default_config['Run']['max_retries']),
-            'max_failures': self.config.getint('Run', 'max_failures', fallback=self.default_config['Run']['max_failures']),
-            'long_interval': self.config.getint('Run', 'long_interval', fallback=self.default_config['Run']['long_interval']),
             'autostart': self.config.getboolean('Run', 'autostart', fallback=self.default_config['Run']['autostart'])
         }
         return run_config
@@ -168,22 +164,71 @@ class ConfigManager:
 # 通知与工具模块
 # =============================================================================
 
-def show_notification(title: str, message: str):
-    """显示系统通知"""
-    try:
-        from win11toast import toast
-        toast(title, message)
-    except ImportError:
-        logging.warning("无法发送系统通知，请安装 win11toast 库: `pip install win11toast`")
-    except Exception as error:
-        logging.error(f"无法发送系统通知: {error}")
+class NotificationManager:
+    """管理系统通知的发送，包括去重和冷却。"""
+    def __init__(self):
+        # 缓存每个通知标签的上次发送时间
+        self.last_notified = {}
+        # 冷却时间，单位：秒
+        self.cooldown = 60  # 1分钟
+        
+        # 尝试一次性导入 win11toast，并缓存结果
+        self.toast_func = None
+        self.is_available = False
+        try:
+            from win11toast import toast as win11_toast
+            self.toast_func = win11_toast
+            self.is_available = True
+        except ImportError:
+            logging.warning("无法发送系统通知，请安装 win11toast 库: `pip install win11toast`")
+        except Exception as error:
+            logging.error(f"初始化系统通知失败: {error}")
+
+    def send(self, title: str, message: str, tag: str = None):
+        """
+        发送系统通知，并应用冷却策略。
+        :param title: 通知标题
+        :param message: 通知消息
+        :param tag: (可选) 用于去重的标签。如果未提供，则使用 title 作为标签。
+        """
+        if not self.is_available:
+            return
+
+        notification_tag = tag if tag else title
+        current_time = time.time()
+        
+        # 检查是否在冷却期内
+        if notification_tag in self.last_notified and \
+           current_time - self.last_notified[notification_tag] < self.cooldown:
+            logging.info(f"通知 '{title}' 在冷却期内，已抑制。")
+            return
+
+        # 更新上次通知时间
+        self.last_notified[notification_tag] = current_time
+        try:
+            self.toast_func(title, message)
+            logging.info(f"已发送通知: {title} - {message}")
+        except Exception as e:
+            logging.error(f"发送系统通知失败: {e}")
+
+# 全局 NotificationManager 实例
+notification_manager = NotificationManager()
+
+def show_notification(title: str, message: str, tag: str = None):
+    """
+    系统通知门面函数。调用全局管理器发送通知。
+    :param title: 通知标题
+    :param message: 通知消息
+    :param tag: (可选) 用于去重的标签。
+    """
+    notification_manager.send(title, message, tag)
 
 def is_internet_connected(timeout: int = 5) -> bool:
     """
     通过访问多个公共服务，进行多次重试来检测互联网连接状态。
     只有当所有服务的所有尝试都失败时，才认为网络未连接。
     """
-    CHECK_URLS = ["bing.com", "baidu.com", "1.1.1.1"]
+    CHECK_URLS = ["http://www.bing.com", "http://www.baidu.com"]
     MAX_RETRY_ATTEMPTS = 3
     RETRY_INTERVAL = 1 # 间隔1秒重试
 
@@ -277,6 +322,9 @@ class CampusLoginService:
         self.dr_com_ip = self.network_config.get('dr_com_ip', '')
         self.login_url = f'http://{self.dr_com_ip}/'
         self.login_api = f'http://{self.dr_com_ip}:801/eportal/portal/login'
+        
+        # 跟踪网络状态
+        self.is_online = False
 
     def check_login_status(self) -> str:
         """检查当前登录状态"""
@@ -329,16 +377,6 @@ class CampusLoginService:
     def login_process(self) -> bool:
         """执行登录流程（包含重试机制）"""
         logging.info("开始校园网登录流程...")
-        status = self.check_login_status()
-        
-        if status == 'already_login':
-            logging.info("设备已登录校园网")
-            show_notification("登录状态", "设备已登录校园网")
-            return True
-        elif status == 'error':
-            logging.warning("无法访问校园网登录页面，可能未连接到校园网或网络异常。")
-            show_notification("网络错误", "无法访问校园网登录页面")
-            return False
         
         for attempt in range(1, self.run_config['max_retries'] + 1):
             logging.info(f"第 {attempt} 次登录尝试...")
@@ -347,7 +385,6 @@ class CampusLoginService:
                 login_params = self.build_login_parameters(network_info)
                 if self.attempt_login(login_params):
                     logging.info("校园网登录成功!")
-                    show_notification("登录成功", "校园网已连接")
                     return True
                 else:
                     logging.warning(f"第 {attempt} 次登录尝试失败")
@@ -359,34 +396,30 @@ class CampusLoginService:
                 time.sleep(self.run_config['retry_interval'])
         
         logging.error(f"登录失败，已重试 {self.run_config['max_retries']} 次")
-        show_notification("登录失败", "自动登录已停止，请手动登录")
+        show_notification("登录失败", "自动登录已停止，请手动登录", tag="login_fail")
         return False
 
     def run_loop(self):
         """主程序循环"""
-        consecutive_failures = 0
         while True:
-            logging.info(f"开始网络检测...")
+            current_is_online = is_internet_connected()
             
-            if is_internet_connected():
-                logging.info("✓ 网络正常，无需操作")
-                consecutive_failures = 0
-                time.sleep(self.run_config['check_interval'])
-                continue
-            
-            logging.warning("✗ 网络未连通，准备登录校园网...")
-            
-            if self.login_process():
-                consecutive_failures = 0
+            if current_is_online:
+                if not self.is_online:
+                    logging.info("网络已恢复连接")
+                    show_notification("网络状态", "互联网已恢复连接", tag="network_restored")
+                self.is_online = True
             else:
-                consecutive_failures += 1
-                logging.warning(f"登录失败，连续失败次数: {consecutive_failures}")
+                if self.is_online:
+                    logging.warning("网络连接已断开")
+                    show_notification("网络状态", "互联网连接已断开", tag="network_dropped")
+                self.is_online = False
+                
+                # 如果掉线，则尝试登录
+                if not self.is_online:
+                    self.login_process()
             
-            if consecutive_failures >= self.run_config['max_failures']:
-                logging.warning(f"连续失败 {self.run_config['max_failures']} 次，延长检测间隔至 {self.run_config['long_interval']} 秒。")
-                time.sleep(self.run_config['long_interval'])
-            else:
-                time.sleep(self.run_config['check_interval'])
+            time.sleep(self.run_config['check_interval'])
 
 # =============================================================================
 # GUI 配置界面
@@ -483,10 +516,10 @@ def run_main_service(config_manager: ConfigManager):
         service.run_loop()
     except KeyboardInterrupt:
         logging.info("\n程序被用户中断")
-        show_notification("程序停止", "校园网自动登录已停止")
+        show_notification("程序停止", "校园网自动登录已停止", tag="shutdown")
     except Exception as error:
         logging.exception("主程序发生未预期错误")
-        show_notification("程序错误", "程序运行异常，请查看日志文件。")
+        show_notification("程序错误", "程序运行异常，请查看日志文件。", tag="error")
 
 # =============================================================================
 # 主程序入口
@@ -520,7 +553,7 @@ if __name__ == "__main__":
         updated_log_path = config_manager.get_log_path()
         if all(updated_credentials.values()) and updated_network_config.get('dr_com_ip', '').strip() and updated_log_path:
             logging.info("GUI配置完成，自动启动后台服务。")
-            show_notification("程序启动", "校园网自动登录服务已在后台运行")
+            show_notification("程序启动", "校园网自动登录服务已在后台运行", tag="startup")
             # 重新配置日志，使用新的路径
             setup_logging(updated_log_path)
             run_main_service(config_manager)
@@ -531,5 +564,5 @@ if __name__ == "__main__":
     # 已有配置，直接静默启动主循环
     else:
         logging.info("检测到有效配置，将直接启动后台服务...")
-        show_notification("程序启动", "校园网自动登录服务已在后台运行")
+        show_notification("程序启动", "校园网自动登录服务已在后台运行", tag="startup")
         run_main_service(config_manager)
