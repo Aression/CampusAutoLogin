@@ -18,20 +18,43 @@ import logging.handlers
 # GUI 库
 import tkinter as tk
 from tkinter import messagebox
+from tkinter import filedialog
 
 # =============================================================================
 # 日志配置
 # =============================================================================
-LOG_FILE = 'campus_autologin.log'
+# 默认日志文件路径，程序会根据配置修改
+LOG_PATH = ''
+LOG_FILE_NAME = 'campus_autologin.log'
 LOG_FORMAT = '%(asctime)s - %(levelname)s - %(message)s'
 
-logging.basicConfig(level=logging.INFO, format=LOG_FORMAT)
-# 将日志输出到文件，以便在后台模式下查看
-file_handler = logging.handlers.RotatingFileHandler(
-    LOG_FILE, maxBytes=1024 * 1024, backupCount=5, encoding='utf-8'
-)
-file_handler.setFormatter(logging.Formatter(LOG_FORMAT))
-logging.getLogger().addHandler(file_handler)
+def setup_logging(log_dir: str):
+    """
+    配置日志系统，将日志输出到指定文件。
+    如果指定目录不存在，则创建。
+    """
+    global LOG_PATH
+    LOG_PATH = log_dir
+
+    # 确保日志目录存在
+    if not os.path.exists(LOG_PATH):
+        os.makedirs(LOG_PATH)
+        
+    log_file_path = os.path.join(LOG_PATH, LOG_FILE_NAME)
+    
+    # 重置现有日志处理器
+    for handler in logging.getLogger().handlers[:]:
+        logging.getLogger().removeHandler(handler)
+
+    # 将日志输出到文件，以便在后台模式下查看
+    file_handler = logging.handlers.RotatingFileHandler(
+        log_file_path, maxBytes=1024 * 1024, backupCount=5, encoding='utf-8'
+    )
+    file_handler.setFormatter(logging.Formatter(LOG_FORMAT))
+    
+    # 配置根日志器
+    logging.basicConfig(level=logging.INFO, format=LOG_FORMAT, handlers=[file_handler])
+
 
 # =============================================================================
 # 配置管理
@@ -43,7 +66,7 @@ class ConfigManager:
     """管理程序配置和用户凭证"""
     def __init__(self):
         self.config = configparser.ConfigParser()
-        # 更新默认配置，增加 Dr.com 认证IP字段
+        # 更新默认配置，增加 Dr.com 认证IP字段和日志路径
         self.default_config = {
             'User': {
                 'account': '',
@@ -59,7 +82,8 @@ class ConfigManager:
                 'max_retries': 3,
                 'max_failures': 5,
                 'long_interval': 300,
-                'autostart': False
+                'autostart': False,
+                'log_path': os.getcwd() # 默认日志路径为当前目录
             }
         }
         
@@ -109,6 +133,10 @@ class ConfigManager:
         }
         return network_config
     
+    def get_log_path(self) -> str:
+        """获取日志路径"""
+        return self.config.get('Run', 'log_path', fallback=self.default_config['Run']['log_path'])
+    
     def save_config(self):
         """保存所有配置到文件"""
         with open(CONFIG_FILE, 'w') as f:
@@ -130,6 +158,12 @@ class ConfigManager:
         self.config['Run']['autostart'] = str(value)
         self.save_config()
 
+    def update_log_path(self, path: str):
+        """更新并保存日志路径"""
+        self.config['Run']['log_path'] = path
+        self.save_config()
+
+
 # =============================================================================
 # 通知与工具模块
 # =============================================================================
@@ -145,15 +179,33 @@ def show_notification(title: str, message: str):
         logging.error(f"无法发送系统通知: {error}")
 
 def is_internet_connected(timeout: int = 5) -> bool:
-    """通过访问公共服务检测互联网连接状态"""
-    try:
-        requests.get("http://www.google.com/generate_204", timeout=timeout)
-        return True
-    except requests.RequestException:
-        return False
-    except Exception as error:
-        logging.error(f"网络检测失败: {error}")
-        return False
+    """
+    通过访问多个公共服务，进行多次重试来检测互联网连接状态。
+    只有当所有服务的所有尝试都失败时，才认为网络未连接。
+    """
+    CHECK_URLS = ["bing.com", "baidu.com", "1.1.1.1"]
+    MAX_RETRY_ATTEMPTS = 3
+    RETRY_INTERVAL = 1 # 间隔1秒重试
+
+    for attempt in range(MAX_RETRY_ATTEMPTS):
+        logging.info(f"第 {attempt + 1} 次尝试连接到公共网站...")
+        for url in CHECK_URLS:
+            try:
+                requests.get(url, timeout=timeout)
+                logging.info(f"✓ 已成功连接到 {url}，网络正常。")
+                return True
+            except requests.RequestException:
+                logging.warning(f"✗ 无法连接到 {url}。")
+            except Exception as error:
+                logging.error(f"网络检测失败: {error}")
+
+        # 如果不是最后一次尝试，则等待后重试
+        if attempt < MAX_RETRY_ATTEMPTS - 1:
+            logging.info(f"所有网站连接失败，等待 {RETRY_INTERVAL} 秒后重试...")
+            time.sleep(RETRY_INTERVAL)
+            
+    logging.warning("所有网站在多次尝试后均无法连接，判定为网络未连通。")
+    return False
 
 def get_current_ip() -> str:
     """获取当前设备的IPv4地址"""
@@ -347,9 +399,10 @@ class ConfigGUI(tk.Toplevel):
         self.config_manager = config_manager
         self.user_credentials = self.config_manager.get_user_credentials()
         self.network_config = self.config_manager.get_network_config()
+        self.run_config = self.config_manager.get_run_config()
 
         self.title("校园网自动登录程序配置")
-        self.geometry("300x250")
+        self.geometry("350x300")
         self.resizable(False, False)
         self.attributes('-topmost', True)
 
@@ -360,41 +413,59 @@ class ConfigGUI(tk.Toplevel):
         frame.pack(expand=True, fill="both")
 
         tk.Label(frame, text="账号:").grid(row=0, column=0, sticky="w", pady=5)
-        self.account_entry = tk.Entry(frame, width=30)
+        self.account_entry = tk.Entry(frame, width=35)
         self.account_entry.grid(row=0, column=1, pady=5)
         self.account_entry.insert(0, self.user_credentials['account'])
 
         tk.Label(frame, text="密码:").grid(row=1, column=0, sticky="w", pady=5)
-        self.password_entry = tk.Entry(frame, width=30, show="*")
+        self.password_entry = tk.Entry(frame, width=35, show="*")
         self.password_entry.grid(row=1, column=1, pady=5)
         self.password_entry.insert(0, self.user_credentials['password'])
 
         # 新增认证IP输入框
         tk.Label(frame, text="认证IP:").grid(row=2, column=0, sticky="w", pady=5)
-        self.ip_entry = tk.Entry(frame, width=30)
+        self.ip_entry = tk.Entry(frame, width=35)
         self.ip_entry.grid(row=2, column=1, pady=5)
         self.ip_entry.insert(0, self.network_config['dr_com_ip'])
 
+        # 新增日志路径设置
+        tk.Label(frame, text="日志路径:").grid(row=3, column=0, sticky="w", pady=5)
+        self.log_path_entry = tk.Entry(frame, width=25)
+        self.log_path_entry.grid(row=3, column=1, sticky="w", pady=5)
+        self.log_path_entry.insert(0, self.config_manager.get_log_path())
+
+        self.log_path_button = tk.Button(frame, text="选择", command=self.select_log_path)
+        self.log_path_button.grid(row=3, column=1, sticky="e", padx=5)
+
         self.autostart_var = tk.BooleanVar()
-        self.autostart_var.set(self.config_manager.get_run_config()['autostart'])
+        self.autostart_var.set(self.run_config['autostart'])
         self.autostart_check = tk.Checkbutton(frame, text="开机自启", variable=self.autostart_var)
-        self.autostart_check.grid(row=3, column=0, columnspan=2, pady=10)
+        self.autostart_check.grid(row=4, column=0, columnspan=2, pady=10)
 
         save_button = tk.Button(frame, text="保存并启动", command=self.save_and_quit)
-        save_button.grid(row=4, column=0, columnspan=2, pady=10)
+        save_button.grid(row=5, column=0, columnspan=2, pady=10)
+
+    def select_log_path(self):
+        """通过文件对话框选择日志保存目录"""
+        folder_path = filedialog.askdirectory(parent=self, title="选择日志保存目录")
+        if folder_path:
+            self.log_path_entry.delete(0, tk.END)
+            self.log_path_entry.insert(0, folder_path)
 
     def save_and_quit(self):
         account = self.account_entry.get().strip()
         password = self.password_entry.get().strip()
         ip = self.ip_entry.get().strip()
+        log_path = self.log_path_entry.get().strip()
         autostart = self.autostart_var.get()
 
-        if not account or not password or not ip:
-            messagebox.showerror("错误", "账号、密码和认证IP都不能为空！")
+        if not account or not password or not ip or not log_path:
+            messagebox.showerror("错误", "账号、密码、认证IP和日志路径都不能为空！")
             return
 
         self.config_manager.update_user_credentials(account, password)
         self.config_manager.update_dr_com_ip(ip)
+        self.config_manager.update_log_path(log_path)
         self.config_manager.update_autostart(autostart)
         set_autostart(autostart)
 
@@ -424,6 +495,10 @@ def run_main_service(config_manager: ConfigManager):
 if __name__ == "__main__":
     is_frozen = getattr(sys, 'frozen', False)
     config_manager = ConfigManager()
+    
+    # 在GUI界面启动前先配置日志，确保日志正常工作
+    setup_logging(config_manager.get_log_path())
+    
     user_credentials = config_manager.get_user_credentials()
     network_config = config_manager.get_network_config()
 
@@ -434,7 +509,7 @@ if __name__ == "__main__":
     if not has_credentials or not has_ip:
         logging.info("首次运行或配置不完整，启动GUI配置...")
         root = tk.Tk()
-        root.withdraw()  # 隐藏主窗口
+        root.withdraw() # 隐藏主窗口
         ConfigGUI(root, config_manager)
         root.mainloop()
         
@@ -442,9 +517,12 @@ if __name__ == "__main__":
         # 此时配置已保存，检查是否可以进入后台服务
         updated_credentials = config_manager.get_user_credentials()
         updated_network_config = config_manager.get_network_config()
-        if all(updated_credentials.values()) and updated_network_config.get('dr_com_ip', '').strip():
+        updated_log_path = config_manager.get_log_path()
+        if all(updated_credentials.values()) and updated_network_config.get('dr_com_ip', '').strip() and updated_log_path:
             logging.info("GUI配置完成，自动启动后台服务。")
             show_notification("程序启动", "校园网自动登录服务已在后台运行")
+            # 重新配置日志，使用新的路径
+            setup_logging(updated_log_path)
             run_main_service(config_manager)
         else:
             logging.info("GUI配置未完成或被取消，程序退出。")
